@@ -7,5 +7,5 @@ images:
   newName: gcr.io/k8s-staging-sig-storage/cosi-driver-sample
   newTag: main
 - name: sidecar
-  newName: gcr.io/k8s-staging-sig-storage/objectstorage-sidecar/objectstorage-sidecar
-  newTag: v20221117-v0.1.0-22-g0e67387
+  newName: gcr.io/k8s-staging-sig-storage/objectstorage-sidecar
+  newTag: v0.2.2

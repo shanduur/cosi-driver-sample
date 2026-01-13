@@ -20,7 +20,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	cosi "sigs.k8s.io/container-object-storage-interface-spec"
+	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 )
 
 func TestClient_CreateBucket(t *testing.T) {
@@ -193,7 +193,7 @@ func TestClient_CreateBucketAccess(t *testing.T) {
 			platform:       "s3",
 			bucketName:     "test-bucket",
 			accessName:     "test-access",
-			credentialKeys: []string{"accessKeyId", "accessSecretKey"},
+			credentialKeys: []string{"accessKeyID", "accessSecretKey"},
 		},
 		"azure platform": {
 			platform:       "azure",
@@ -261,7 +261,7 @@ func TestClient_ProtocolInfo(t *testing.T) {
 
 	tests := map[string]struct {
 		platform     string
-		protocolType interface{}
+		protocolType any
 	}{
 		"s3 platform": {
 			platform:     "s3",

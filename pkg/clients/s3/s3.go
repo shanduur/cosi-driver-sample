@@ -25,7 +25,9 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	cosi "sigs.k8s.io/container-object-storage-interface-spec"
+	"sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/consts"
+
+	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 	"sigs.k8s.io/cosi-driver-sample/pkg/clients"
 )
 
@@ -68,14 +70,14 @@ func (u *user) Name() string {
 // Credentials returns a map of the user's S3 access credentials.
 func (u *user) Credentials() map[string]string {
 	return map[string]string{
-		"accessKeyId":     u.AccessKeyID,
-		"accessSecretKey": u.AccessSecretKey,
+		consts.S3SecretAccessKeyID:     u.AccessKeyID,
+		consts.S3SecretAccessSecretKey: u.AccessSecretKey,
 	}
 }
 
 // Platform returns the name of the platform associated with the user.
 func (u *user) Platform() string {
-	return "s3"
+	return consts.S3Key
 }
 
 // New creates a new S3 Client instance.
