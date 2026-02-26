@@ -20,7 +20,8 @@ import (
 	"maps"
 	"math/rand"
 
-	cosi "sigs.k8s.io/container-object-storage-interface-spec"
+	"sigs.k8s.io/container-object-storage-interface/client/apis/objectstorage/consts"
+	cosi "sigs.k8s.io/container-object-storage-interface/proto"
 	"sigs.k8s.io/cosi-driver-sample/pkg/clients"
 )
 
@@ -51,10 +52,10 @@ func New(platform string) *Client {
 	)
 
 	switch platform {
-	case "azure":
+	case consts.AzureKey:
 		credentials = func(id, key string) map[string]string {
 			return map[string]string{
-				"accessToken": key,
+				consts.AzureSecretAccessToken: key,
 			}
 		}
 		proto = func() *cosi.Protocol {
@@ -67,11 +68,11 @@ func New(platform string) *Client {
 			}
 		}
 
-	case "s3":
+	case consts.S3Key:
 		credentials = func(id, key string) map[string]string {
 			return map[string]string{
-				"accessKeyId":     id,
-				"accessSecretKey": key,
+				consts.S3SecretAccessKeyID:     id,
+				consts.S3SecretAccessSecretKey: key,
 			}
 		}
 		proto = func() *cosi.Protocol {
