@@ -1,0 +1,16 @@
+# CephObjectStoreUser for the sample driver's e2e tests.
+#
+# Capabilities are widened to user/bucket "*" so the driver can create and
+# delete buckets via its admin credentials. The rest of the Rook test stack
+# is pulled verbatim from upstream by hack/setup-rook.sh.
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: my-user
+  namespace: rook-ceph
+spec:
+  store: my-store
+  displayName: "COSI Sample Driver E2E Test User"
+  capabilities:
+    user: "*"
+    bucket: "*"

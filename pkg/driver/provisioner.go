@@ -1,4 +1,4 @@
-// Copyright 2021-2024 The Kubernetes Authors.
+// Copyright 2021 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,14 +17,14 @@ package driver
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"k8s.io/klog/v2"
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
-	"sigs.k8s.io/cosi-driver-sample/pkg/clients"
-	"sigs.k8s.io/cosi-driver-sample/pkg/config"
+	"sigs.k8s.io/cosi-driver-sample/internal/s3"
 )
 
 var ErrBucketNotFound = errors.New("bucket not found")
@@ -33,86 +33,101 @@ var ErrBucketNotFound = errors.New("bucket not found")
 type ProvisionerServer struct {
 	cosi.UnimplementedProvisionerServer
 
-	Client clients.Client
-	Config config.Config
+	DynamicClient func(ctx context.Context, params map[string]string) (s3.DynamicClient, error)
 }
 
 // DriverCreateBucket creates a bucket if it does not already exist.
 // If the bucket exists and the parameters match, it returns success without error.
 // If the bucket exists but the parameters differ, it returns a conflict error.
-//
-// Return values:
-//   - nil: The bucket was successfully created or already exists with matching parameters.
-//   - codes.AlreadyExists: The bucket already exists but with different parameters.
-//   - error: Internal error requiring retries.
 func (s *ProvisionerServer) DriverCreateBucket(
 	ctx context.Context,
 	req *cosi.DriverCreateBucketRequest,
 ) (*cosi.DriverCreateBucketResponse, error) {
-	bucketName, overridden := s.getName(req)
+	bucketName := req.GetName()
 	parameters := req.GetParameters()
 
-	if err := s.Config.Errors.CreateBucket; err != nil {
-		klog.ErrorS(err, "Purposefully failing DriverCreateBucket call", "bucket", bucketName, "parameters", parameters)
-		return nil, status.Error(err.Code, err.Message)
+	if !slices.ContainsFunc(
+		req.GetProtocols(),
+		func(p *cosi.ObjectProtocol) bool { return p.GetType() == cosi.ObjectProtocol_S3 },
+	) {
+		return nil, status.Error(codes.InvalidArgument, "Missing required S3 protocol in request")
 	}
 
-	exists, err := s.Client.BucketExists(ctx, bucketName)
+	s3cli, err := s.DynamicClient(ctx, parameters)
 	if err != nil {
-		klog.ErrorS(err, "Failed to check bucket existence", "bucket", bucketName, "parameters", parameters)
-		return nil, status.Errorf(codes.Internal, "%s", err)
-	}
-	if exists {
-		if overridden {
-			klog.InfoS("Overridden bucket exists, skipping validation", "bucket", bucketName, "parameters", parameters)
-			return &cosi.DriverCreateBucketResponse{BucketId: bucketName}, nil
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to initialize S3 client due to missing parameter", "bucket", bucketName)
+			return nil, status.Error(codes.InvalidArgument, "Failed to initialize S3 client due to missing parameter: \""+mpErr.Parameter+"\"")
 		}
 
-		equal, err := s.Client.IsBucketEqual(ctx, bucketName, parameters)
+		klog.ErrorS(err, "Failed to initialize S3 client", "bucket", bucketName, "parameters", parameters)
+		return nil, status.Error(codes.Internal, "Failed to initialize S3 client")
+	}
+
+	bucketInfo, err := s3cli.BucketInfo(ctx, bucketName)
+	if err != nil {
+		if _, ok := errors.AsType[s3.BucketNotFoundError](err); !ok {
+			klog.ErrorS(err, "Failed to check bucket existence", "bucket", bucketName, "parameters", parameters)
+			return nil, status.Error(codes.Internal, "Failed to check bucket existence")
+		}
+	}
+
+	if bucketInfo == nil {
+		bucketInfo, err = s3cli.CreateBucket(ctx, bucketName, parameters)
 		if err != nil {
-			klog.ErrorS(err, "Failed to compare bucket with expected parameters", "bucket", bucketName, "parameters", parameters)
-			return nil, status.Errorf(codes.Internal, "%s", err)
-		}
-		if equal {
-			klog.InfoS("Bucket already exists with matching parameters", "bucket", bucketName)
-			return &cosi.DriverCreateBucketResponse{BucketId: bucketName}, nil
-		}
+			if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+				klog.ErrorS(err, "Failed to create bucket due to missing parameter", "bucket", bucketName)
+				return nil, status.Error(codes.InvalidArgument, "Failed to create bucket due to missing parameter: \""+mpErr.Parameter+"\"")
+			}
 
-		klog.InfoS("Bucket already exists with differing parameters", "bucket", bucketName)
-		return nil, status.Errorf(codes.AlreadyExists, "bucket already exists: %s", bucketName)
-	}
-
-	if err := s.Client.CreateBucket(ctx, bucketName, parameters); err != nil {
-		klog.ErrorS(err, "Failed to create bucket", "bucket", bucketName)
-		return nil, err
+			klog.ErrorS(err, "Failed to create bucket", "bucket", bucketName)
+			return nil, status.Error(codes.Internal, "Failed to create bucket")
+		}
 	}
 
 	klog.InfoS("Bucket successfully created", "bucket", bucketName)
 	return &cosi.DriverCreateBucketResponse{
-		BucketId:   bucketName,
-		BucketInfo: s.Client.ProtocolInfo(),
+		BucketId: bucketInfo.BucketName,
+		Protocols: &cosi.ObjectProtocolAndBucketInfo{
+			S3: &cosi.S3BucketInfo{
+				BucketId: bucketInfo.BucketName,
+				Endpoint: bucketInfo.Endpoint,
+				Region:   bucketInfo.Region,
+				AddressingStyle: &cosi.S3AddressingStyle{
+					Style: cosi.S3AddressingStyle_PATH,
+				},
+			},
+		},
 	}, nil
 }
 
 // DriverDeleteBucket deletes a bucket if it exists. If the bucket does not exist, it returns success.
-//
-// Return values:
-//   - nil: The bucket was successfully deleted or does not exist.
-//   - error: Internal error requiring retries.
 func (s *ProvisionerServer) DriverDeleteBucket(
 	ctx context.Context,
 	req *cosi.DriverDeleteBucketRequest,
 ) (*cosi.DriverDeleteBucketResponse, error) {
-	bucketId := s.getBucketID(req)
+	bucketId := req.GetBucketId()
+	parameters := req.GetParameters()
 
-	if err := s.Config.Errors.DeleteBucket; err != nil {
-		klog.ErrorS(err, "Purposefully failing DriverDeleteBucket call", "bucket", bucketId)
-		return nil, status.Error(err.Code, err.Message)
+	s3cli, err := s.DynamicClient(ctx, parameters)
+	if err != nil {
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to initialize S3 client due to missing parameter", "bucket", bucketId)
+			return nil, status.Error(codes.InvalidArgument, "Failed to initialize S3 client due to missing parameter: \""+mpErr.Parameter+"\"")
+		}
+
+		klog.ErrorS(err, "Failed to initialize S3 client", "bucket", bucketId)
+		return nil, status.Error(codes.Internal, "Failed to initialize S3 client")
 	}
 
-	if err := s.Client.DeleteBucket(ctx, bucketId); err != nil {
+	if err := s3cli.DeleteBucket(ctx, bucketId, parameters); err != nil {
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to delete bucket due to missing parameter", "bucket", bucketId)
+			return nil, status.Error(codes.InvalidArgument, "Failed to delete bucket due to missing parameter: \""+mpErr.Parameter+"\"")
+		}
+
 		klog.ErrorS(err, "Failed to delete bucket", "bucket", bucketId)
-		return nil, status.Errorf(codes.Internal, "%s", err)
+		return nil, status.Error(codes.Internal, "Failed to delete bucket")
 	}
 
 	klog.InfoS("Bucket successfully deleted", "bucket", bucketId)
@@ -128,37 +143,74 @@ func (s *ProvisionerServer) DriverGrantBucketAccess(
 	ctx context.Context,
 	req *cosi.DriverGrantBucketAccessRequest,
 ) (*cosi.DriverGrantBucketAccessResponse, error) {
-	bucketId := s.getBucketID(req)
-	name, _ := s.getName(req)
+	name := req.GetAccountName()
+	parameters := req.GetParameters()
 
-	if err := s.Config.Errors.GrantBucketAccess; err != nil {
-		klog.ErrorS(err, "Purposefully failing DriverGrantBucketAccess call", "bucket", bucketId, "account", name)
-		return nil, status.Error(err.Code, err.Message)
+	if req.GetProtocol().GetType() != cosi.ObjectProtocol_S3 {
+		return nil, status.Error(codes.InvalidArgument, "Unsupported protocol type")
 	}
 
-	exists, err := s.Client.BucketExists(ctx, bucketId)
+	if req.GetAuthenticationType().GetType() != cosi.AuthenticationType_KEY {
+		return nil, status.Error(codes.InvalidArgument, "Unsupported authentication type")
+	}
+
+	s3cli, err := s.DynamicClient(ctx, parameters)
 	if err != nil {
-		klog.ErrorS(err, "Failed to check bucket existence", "bucket", bucketId, "account", name)
-		return nil, status.Errorf(codes.Internal, "%s", err)
-	}
-	if !exists {
-		klog.ErrorS(ErrBucketNotFound, "Cannot grant access to nonexistent bucket", "bucket", bucketId, "account", name)
-		return nil, status.Errorf(codes.NotFound, "%s", ErrBucketNotFound)
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to initialize S3 client due to missing parameter", "account", name)
+			return nil, status.Error(codes.InvalidArgument, "Failed to initialize S3 client due to missing parameter: \""+mpErr.Parameter+"\"")
+		}
+
+		klog.ErrorS(err, "Failed to initialize S3 client", "account", name)
+		return nil, status.Error(codes.Internal, "Failed to initialize S3 client")
 	}
 
-	access, err := s.Client.CreateBucketAccess(ctx, bucketId, name)
+	var (
+		bucketIds []string
+		errs      error
+	)
+
+	for _, bucket := range req.GetBuckets() {
+		_, err := s3cli.BucketInfo(ctx, bucket.BucketId)
+		if err != nil {
+			if _, ok := errors.AsType[s3.BucketNotFoundError](err); !ok {
+				errs = errors.Join(errs, err)
+
+				continue
+			}
+
+			klog.ErrorS(err, "Failed to check bucket existence", "bucket", bucket.BucketId, "account", name)
+			return nil, status.Error(codes.Internal, "Failed to check bucket existence")
+		}
+
+		bucketIds = append(bucketIds, bucket.BucketId)
+	}
+
+	if errs != nil {
+		klog.ErrorS(ErrBucketNotFound, "Cannot grant access to nonexistent bucket", "buckets", bucketIds, "account", name)
+		return nil, status.Error(codes.NotFound, "Cannot grant access to nonexistent bucket(s)")
+	}
+
+	accessInfo, err := s3cli.CreateBucketAccess(ctx, name, bucketIds, parameters)
 	if err != nil {
-		klog.ErrorS(err, "Failed to create bucket access", "bucket", bucketId, "account", name)
-		return nil, status.Errorf(codes.Internal, "%s", err)
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to create bucket access due to missing parameter", "account", name)
+			return nil, status.Error(codes.InvalidArgument, "Failed to create bucket access due to missing parameter: \""+mpErr.Parameter+"\"")
+		}
+
+		klog.ErrorS(err, "Failed to create bucket access", "buckets", bucketIds, "account", name)
+		return nil, status.Error(codes.Internal, "Failed to create bucket access")
 	}
 
-	klog.InfoS("Bucket access successfully granted", "name", access.Name())
+	klog.InfoS("Bucket access successfully granted", "name", "")
 
 	return &cosi.DriverGrantBucketAccessResponse{
-		AccountId: access.Name(),
-		Credentials: map[string]*cosi.CredentialDetails{
-			access.Platform(): {
-				Secrets: access.Credentials(),
+		AccountId: accessInfo.AccountID,
+		Buckets:   rewriteBuckets(accessInfo.Buckets),
+		Credentials: &cosi.CredentialInfo{
+			S3: &cosi.S3CredentialInfo{
+				AccessKeyId:     accessInfo.AccessKeyID,
+				AccessSecretKey: accessInfo.SecretKey,
 			},
 		},
 	}, nil
@@ -166,43 +218,68 @@ func (s *ProvisionerServer) DriverGrantBucketAccess(
 
 // DriverRevokeBucketAccess revokes access to a bucket for a specific account.
 // If the access does not exist, it returns success.
-//
-// Return values:
-//   - nil: Access successfully revoked or does not exist.
-//   - error: Internal error requiring retries.
 func (s *ProvisionerServer) DriverRevokeBucketAccess(
 	ctx context.Context,
 	req *cosi.DriverRevokeBucketAccessRequest,
 ) (*cosi.DriverRevokeBucketAccessResponse, error) {
-	bucketId := s.getBucketID(req)
 	accountId := req.GetAccountId()
+	parameters := req.GetParameters()
 
-	if err := s.Config.Errors.RevokeBucketAccess; err != nil {
-		klog.ErrorS(err, "Purposefully failing DriverRevokeBucketAccess call", "bucket", bucketId, "account", accountId)
-		return nil, status.Error(err.Code, err.Message)
+	if req.GetProtocol().GetType() != cosi.ObjectProtocol_S3 {
+		return nil, status.Error(codes.InvalidArgument, "Unsupported protocol type")
 	}
 
-	if err := s.Client.DeleteBucketAccess(ctx, bucketId, accountId); err != nil {
-		klog.ErrorS(err, "Failed to revoke bucket access", "bucket", bucketId, "account", accountId)
-		return nil, status.Errorf(codes.Internal, "%s", err)
+	s3cli, err := s.DynamicClient(ctx, parameters)
+	if err != nil {
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to initialize S3 client due to missing parameter", "account", accountId)
+			return nil, status.Error(codes.InvalidArgument, "Failed to initialize S3 client due to missing parameter: \""+mpErr.Parameter+"\"")
+		}
+
+		klog.ErrorS(err, "Failed to initialize S3 client", "account", accountId)
+		return nil, status.Error(codes.Internal, "Failed to initialize S3 client")
 	}
 
-	klog.InfoS("Bucket access successfully revoked", "bucket", bucketId, "account", accountId)
+	bucketIds := make([]string, 0, len(req.GetBuckets()))
+
+	for _, bucket := range req.GetBuckets() {
+		bucketIds = append(bucketIds, bucket.BucketId)
+	}
+
+	if err := s3cli.DeleteBucketAccess(ctx, accountId, bucketIds, parameters); err != nil {
+		if mpErr, ok := errors.AsType[s3.MissingParameterError](err); ok {
+			klog.ErrorS(err, "Failed to revoke bucket access due to missing parameter", "account", accountId)
+			return nil, status.Error(codes.InvalidArgument, "Failed to revoke bucket access due to missing parameter: \""+mpErr.Parameter+"\"")
+		}
+
+		klog.ErrorS(err, "Failed to revoke bucket access", "buckets", bucketIds, "account", accountId)
+		return nil, status.Error(codes.Internal, "Failed to revoke bucket access")
+	}
+
+	klog.InfoS("Bucket access successfully revoked", "buckets", bucketIds, "account", accountId)
 	return &cosi.DriverRevokeBucketAccessResponse{}, nil
 }
 
-func (s *ProvisionerServer) getName(req interface{ GetName() string }) (string, bool) {
-	if id := s.Config.Overrides.BucketID; id != "" {
-		return id, false
+func rewriteBuckets(
+	in []s3.BucketInfo,
+) []*cosi.DriverGrantBucketAccessResponse_BucketInfo {
+	buckets := make([]*cosi.DriverGrantBucketAccessResponse_BucketInfo, 0, len(in))
+
+	for _, bucket := range in {
+		buckets = append(buckets, &cosi.DriverGrantBucketAccessResponse_BucketInfo{
+			BucketId: bucket.BucketName,
+			BucketInfo: &cosi.ObjectProtocolAndBucketInfo{
+				S3: &cosi.S3BucketInfo{
+					BucketId: bucket.BucketName,
+					Endpoint: bucket.Endpoint,
+					Region:   bucket.Region,
+					AddressingStyle: &cosi.S3AddressingStyle{
+						Style: cosi.S3AddressingStyle_PATH,
+					},
+				},
+			},
+		})
 	}
 
-	return req.GetName(), true
-}
-
-func (s *ProvisionerServer) getBucketID(req interface{ GetBucketId() string }) string {
-	if id := s.Config.Overrides.BucketID; id != "" {
-		return id
-	}
-
-	return req.GetBucketId()
+	return buckets
 }
