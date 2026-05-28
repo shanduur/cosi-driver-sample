@@ -60,8 +60,6 @@ spec:
         - name: objectstorage-provisioner-sidecar
           image: sidecar
           imagePullPolicy: IfNotPresent
-          args:
-            - "-v=4"
           securityContext:
             readOnlyRootFilesystem: true
           volumeMounts:

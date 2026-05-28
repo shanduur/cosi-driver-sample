@@ -1,4 +1,4 @@
-// Copyright 2021-2024 The Kubernetes Authors.
+// Copyright 2021 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,7 +31,7 @@ var ErrEmptyDriverName = errors.New("empty driver name")
 type IdentityServer struct {
 	cosi.UnimplementedIdentityServer
 
-	Name string
+	DriverName string
 }
 
 // DriverGetInfo returns information about the driver.
@@ -39,12 +39,15 @@ func (id *IdentityServer) DriverGetInfo(
 	ctx context.Context,
 	req *cosi.DriverGetInfoRequest,
 ) (*cosi.DriverGetInfoResponse, error) {
-	if id.Name == "" {
+	if id.DriverName == "" {
 		klog.ErrorS(ErrEmptyDriverName, "Driver name cannot be empty")
 		return nil, status.Errorf(codes.Internal, "%s", ErrEmptyDriverName)
 	}
 
 	return &cosi.DriverGetInfoResponse{
-		Name: id.Name,
+		Name: id.DriverName,
+		SupportedProtocols: []*cosi.ObjectProtocol{
+			{Type: cosi.ObjectProtocol_S3},
+		},
 	}, nil
 }

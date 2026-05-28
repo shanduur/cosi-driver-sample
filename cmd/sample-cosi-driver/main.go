@@ -1,4 +1,4 @@
-// Copyright 2021-2024 The Kubernetes Authors.
+// Copyright 2021 The Kubernetes Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,24 +33,15 @@ import (
 
 	"k8s.io/klog/v2"
 	cosi "sigs.k8s.io/container-object-storage-interface/proto"
-	"sigs.k8s.io/cosi-driver-sample/pkg/clients"
-	"sigs.k8s.io/cosi-driver-sample/pkg/clients/fake"
-	"sigs.k8s.io/cosi-driver-sample/pkg/clients/s3"
-	"sigs.k8s.io/cosi-driver-sample/pkg/config"
+	"sigs.k8s.io/cosi-driver-sample/internal/kube"
+	"sigs.k8s.io/cosi-driver-sample/internal/s3"
 	"sigs.k8s.io/cosi-driver-sample/pkg/driver"
-	yaml "sigs.k8s.io/yaml/goyaml.v3"
 )
 
 type runOptions struct {
 	driverName   string
 	cosiEndpoint string
-	configPath   string
-
-	s3endpoint string
-	s3region   string
-	s3ssl      bool
-	s3admin    s3.S3Credentials
-	s3user     s3.S3Credentials
+	kubeconfig   string
 }
 
 func defaultEnv(key, defaultValue string) string {
@@ -73,19 +64,8 @@ func main() {
 
 	opts := runOptions{
 		cosiEndpoint: defaultEnv("COSI_ENDPOINT", "unix:///var/lib/cosi/cosi.sock"),
-		driverName:   defaultEnv("X_COSI_DRIVER_NAME", "sample.objectstorage.k8s.io"),
-		configPath:   defaultEnv("X_COSI_CONFIG", "/etc/cosi/config.yaml"),
-		s3endpoint:   defaultEnv("S3_ENDPOINT", ""),
-		s3region:     defaultEnv("S3_REGION", ""),
-		s3ssl:        asBool(defaultEnv("S3_SSL", "true")),
-		s3admin: s3.S3Credentials{
-			AccessKeyID:     defaultEnv("S3_ADMIN_ACCESS_KEY_ID", ""),
-			AccessSecretKey: defaultEnv("S3_ADMIN_ACCESS_SECRET_KEY", ""),
-		},
-		s3user: s3.S3Credentials{
-			AccessKeyID:     defaultEnv("S3_USER_ACCESS_KEY_ID", ""),
-			AccessSecretKey: defaultEnv("S3_USER_ACCESS_SECRET_KEY", ""),
-		},
+		driverName:   defaultEnv("X_COSI_DRIVER_NAME", "sample.objectstorage.x-k8s.io"),
+		kubeconfig:   defaultEnv("KUBECONFIG", ""),
 	}
 
 	if err := run(context.Background(), opts); err != nil {
@@ -102,45 +82,14 @@ func run(ctx context.Context, opts runOptions) error {
 	)
 	defer stop()
 
-	cfg := config.Config{}
-
-	f, err := os.Open(opts.configPath)
+	kcli, err := kube.NewClient(opts.kubeconfig)
 	if err != nil {
-		return fmt.Errorf("unable to open config: %w", err)
-	}
-	defer f.Close() //nolint:errcheck // best effort call
-
-	if err := yaml.NewDecoder(f).Decode(&cfg); err != nil {
-		return fmt.Errorf("unable to read config: %w", err)
+		return fmt.Errorf("unable to create Kubernetes client: %w", err)
 	}
 
-	var c clients.Client
-	switch cfg.Mode {
-	case config.ModeAzure:
-		// TODO: implement real minimal Azure connector?
-		panic("unimplemented")
-
-	case config.ModeS3:
-		c, err = s3.New(
-			opts.s3endpoint, opts.s3region,
-			opts.s3admin, opts.s3user,
-			opts.s3ssl,
-		)
-		if err != nil {
-			return fmt.Errorf("unable to create s3 client: %w", err)
-		}
-
-	case config.ModeAzureFake:
-		c = fake.New("azure")
-
-	case config.ModeS3Fake:
-		c = fake.New("s3")
-	}
-
-	identityServer := &driver.IdentityServer{Name: opts.driverName}
+	identityServer := &driver.IdentityServer{DriverName: opts.driverName}
 	provisionerServer := &driver.ProvisionerServer{
-		Client: c,
-		Config: cfg,
+		DynamicClient: s3.NewFactory(kcli).NewClient,
 	}
 
 	server, err := grpcServer(identityServer, provisionerServer)

@@ -1,6 +1,6 @@
 # cosi-driver-sample
 
-Sample Driver that provides reference implementation for Container Object Storage Interface (COSI) API
+Sample Driver that provides reference implementation for Container Object Storage Interface (COSI) API for S3-compatible object storage.
 
 ## Community, discussion, contribution, and support
 

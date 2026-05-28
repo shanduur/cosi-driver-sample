@@ -1,7 +1,7 @@
 #
 # BUILDER
 #
-FROM docker.io/library/golang:1.25.4 AS builder
+FROM docker.io/library/golang:1.26.0 AS builder
 
 WORKDIR /buildroot
 
@@ -12,6 +12,7 @@ RUN go mod download
 # Copy the source.
 COPY pkg/ pkg/
 COPY cmd/ cmd/
+COPY internal/ internal/
 
 # Disable CGO.
 ENV CGO_ENABLED=0
