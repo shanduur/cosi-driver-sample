@@ -47,6 +47,13 @@ USER_SECRET="rook-ceph-object-user-${OBJECT_STORE}-${OBJECT_USER}"
 
 OUT_CREDS_FILE="${OUT_CREDS_FILE:-${PWD}/s3-credentials.yaml}"
 
+# When true, Rook is configured to discover /dev/loop* devices and the
+# CephCluster's storage.deviceFilter is scoped to loop devices only. Used by
+# the COSI Prow CI, where OSDs are backed by loop-mounted files on a kind
+# node (see hack/setup-kind.sh in the container-object-storage-interface
+# repo). Default false: real disks should not opt into loop discovery.
+LOOP_DEVICE_OSDS="${LOOP_DEVICE_OSDS:-false}"
+
 # ---------------------------------------------------------------------------
 # Apply everything up front. CRDs must land first (server-side) so the
 # CephCluster/CephObjectStore/CephObjectStoreUser objects are recognized; the
@@ -60,7 +67,24 @@ echo "==> Applying Rook common/operator/csi-operator + CephCluster + CephObjectS
 kubectl apply -f "${ROOK_RAW_BASE}/common.yaml"
 kubectl apply --server-side -f "${ROOK_RAW_BASE}/csi-operator.yaml"
 kubectl apply -f "${ROOK_RAW_BASE}/operator.yaml"
-kubectl apply -f "${ROOK_RAW_BASE}/cluster-test.yaml"
+
+if [ "${LOOP_DEVICE_OSDS}" = "true" ]; then
+  # ROOK_CEPH_ALLOW_LOOP_DEVICES: Rook skips loop devices by default; the
+  # operator config toggle opts back in.
+  kubectl -n "${ROOK_NS}" patch configmap rook-ceph-operator-config \
+    --type merge \
+    -p '{"data":{"ROOK_CEPH_ALLOW_LOOP_DEVICES":"true"}}'
+
+  # deviceFilter: the upstream cluster-test.yaml uses useAllDevices: true,
+  # which would grab every /dev/[sh]d? on the runner too. Scope OSD
+  # discovery to loop devices only so the runner's system disk is untouched.
+  curl --fail --location --silent "${ROOK_RAW_BASE}/cluster-test.yaml" \
+    | sed '/useAllDevices: true/a\    deviceFilter: "^loop[0-9]+$"' \
+    | kubectl apply -f -
+else
+  kubectl apply -f "${ROOK_RAW_BASE}/cluster-test.yaml"
+fi
+
 kubectl apply -f "${ROOK_RAW_BASE}/object-test.yaml"
 kubectl apply -f "${ROOK_DIR}/object-user.yaml"
 
