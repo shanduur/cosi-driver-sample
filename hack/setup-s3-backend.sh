@@ -50,6 +50,27 @@ OUT_CREDS_FILE="${OUT_CREDS_FILE:-${PWD}/s3-credentials.yaml}"
 LOOP_DEVICE_OSDS="${LOOP_DEVICE_OSDS:-false}"
 LOOP_DEVICE_BACKING_DIR="${LOOP_DEVICE_BACKING_DIR:-}"
 
+run_as_root() {
+  if (( EUID == 0 )); then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+ensure_udev_data() {
+  local dev_file
+  local major_minor
+  local data_file
+
+  run_as_root mkdir -p /run/udev/data
+  for dev_file in /sys/class/block/*/dev; do
+    read -r major_minor < "${dev_file}"
+    data_file="/run/udev/data/b${major_minor}"
+    [ -e "${data_file}" ] || run_as_root touch "${data_file}"
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Apply everything up front. CRDs must land first (server-side) so the
 # CephCluster/CephObjectStore/CephObjectStoreUser objects are recognized; the
@@ -70,6 +91,7 @@ if [ "${LOOP_DEVICE_OSDS}" = "true" ]; then
     exit 1
   }
 
+  ensure_udev_data
   loop_devices=()
   for disk in "${LOOP_DEVICE_BACKING_DIR}"/ceph-osd-*.img; do
     loop_device=$(losetup -j "${disk}" | cut -d: -f1)
