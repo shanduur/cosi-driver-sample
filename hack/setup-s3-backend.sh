@@ -47,7 +47,8 @@ USER_SECRET="rook-ceph-object-user-${OBJECT_STORE}-${OBJECT_USER}"
 
 OUT_CREDS_FILE="${OUT_CREDS_FILE:-${PWD}/s3-credentials.yaml}"
 
-LOOP_DEVICE_NAMES="${LOOP_DEVICE_NAMES:-}"
+LOOP_DEVICE_OSDS="${LOOP_DEVICE_OSDS:-false}"
+LOOP_DEVICE_BACKING_DIR="${LOOP_DEVICE_BACKING_DIR:-}"
 
 # ---------------------------------------------------------------------------
 # Apply everything up front. CRDs must land first (server-side) so the
@@ -63,7 +64,23 @@ kubectl apply -f "${ROOK_RAW_BASE}/common.yaml"
 kubectl apply --server-side -f "${ROOK_RAW_BASE}/csi-operator.yaml"
 kubectl apply -f "${ROOK_RAW_BASE}/operator.yaml"
 
-if [ -n "${LOOP_DEVICE_NAMES}" ]; then
+if [ "${LOOP_DEVICE_OSDS}" = "true" ]; then
+  [ -n "${LOOP_DEVICE_BACKING_DIR}" ] || {
+    echo "LOOP_DEVICE_BACKING_DIR is required when LOOP_DEVICE_OSDS=true" >&2
+    exit 1
+  }
+
+  loop_devices=()
+  for disk in "${LOOP_DEVICE_BACKING_DIR}"/ceph-osd-*.img; do
+    loop_device=$(losetup -j "${disk}" | cut -d: -f1)
+    [ -n "${loop_device}" ] || {
+      echo "no loop device found for ${disk}" >&2
+      exit 1
+    }
+    loop_devices+=("${loop_device}")
+  done
+  LOOP_DEVICE_NAMES=$(IFS=,; echo "${loop_devices[*]}")
+
   kubectl -n "${ROOK_NS}" patch configmap rook-ceph-operator-config \
     --type merge \
     -p '{"data":{"ROOK_CEPH_ALLOW_LOOP_DEVICES":"true"}}'
